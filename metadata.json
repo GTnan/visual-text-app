@@ -1,0 +1,5 @@
+{
+  "name": "智能文本风格迁移助手",
+  "description": "一个利用 AI 将源文本内容转换为参考文本风格（格式、语气、排版）的工具。",
+  "requestFramePermissions": []
+}
