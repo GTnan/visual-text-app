@@ -1,10 +1,23 @@
 
-import express from "express";
+import express, { NextFunction, Request, Response } from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import axios from "axios";
 import cookieParser from "cookie-parser";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import {
+  countUsers,
+  createUser,
+  deleteUser,
+  getUserById,
+  getUserByUsername,
+  listUsers,
+  updateUser,
+  User,
+  UserRole,
+} from "./db";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,12 +29,233 @@ async function startServer() {
   app.use(express.json());
   app.use(cookieParser());
 
+  const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
+  const JWT_EXPIRES_IN = "7d";
+
+  const sanitizeUser = (user: User) => ({
+    id: user.id,
+    username: user.username,
+    role: user.role,
+    is_active: !!user.is_active,
+    created_at: user.created_at,
+    updated_at: user.updated_at,
+  });
+
+  interface AuthRequest extends Request {
+    user?: ReturnType<typeof sanitizeUser>;
+  }
+
+  const authMiddleware = (req: AuthRequest, res: Response, next: NextFunction) => {
+    const token = req.cookies?.auth_token;
+    if (!token) {
+      return res.status(401).json({ error: "未登录" });
+    }
+    try {
+      const payload = jwt.verify(token, JWT_SECRET) as { userId: number };
+      const user = getUserById(payload.userId);
+      if (!user || !user.is_active) {
+        return res.status(401).json({ error: "用户不存在或已被禁用" });
+      }
+      req.user = sanitizeUser(user);
+      next();
+    } catch {
+      return res.status(401).json({ error: "登录状态无效或已过期" });
+    }
+  };
+
+  const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "未登录" });
+    }
+    if (req.user.role !== "admin") {
+      return res.status(403).json({ error: "仅管理员可执行该操作" });
+    }
+    next();
+  };
+
   const FEISHU_APP_ID = process.env.FEISHU_APP_ID || "cli_a925630a77391cce";
   const FEISHU_APP_SECRET = process.env.FEISHU_APP_SECRET || "x4iQ07gNFDCIYKf0ErEnff0bXZ5cGTVu";
   
   // Use the dynamic APP_URL for redirect URI
   const APP_URL = process.env.APP_URL || "https://ais-dev-ippzvk6r2ltnc4wuhm3dui-84545006331.us-west1.run.app";
   const REDIRECT_URI = `${APP_URL}/api/auth/feishu/callback`;
+
+  // --- 用户与认证相关接口 ---
+
+  // 初始化第一个管理员账号，仅在还没有任何用户时允许调用
+  app.post("/api/auth/init-admin", async (req: Request, res: Response) => {
+    const total = countUsers();
+    if (total > 0) {
+      return res.status(400).json({ error: "系统已存在用户，不能再次初始化管理员" });
+    }
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: "username 和 password 为必填" });
+    }
+    try {
+      const hash = await bcrypt.hash(password, 10);
+      const user = createUser(username, hash, "admin");
+      res.json({ success: true, user: sanitizeUser(user) });
+    } catch (e: any) {
+      if (e && e.code === "SQLITE_CONSTRAINT_UNIQUE") {
+        return res.status(400).json({ error: "用户名已存在" });
+      }
+      console.error("Init admin error:", e);
+      res.status(500).json({ error: "初始化管理员失败" });
+    }
+  });
+
+  // 登录
+  app.post("/api/auth/login", async (req: Request, res: Response) => {
+    const { username, password } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: "用户名和密码不能为空" });
+    }
+    const user = getUserByUsername(username);
+    if (!user || !user.is_active) {
+      return res.status(400).json({ error: "用户名或密码错误" });
+    }
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) {
+      return res.status(400).json({ error: "用户名或密码错误" });
+    }
+    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+    res.cookie("auth_token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    res.json({ user: sanitizeUser(user) });
+  });
+
+  // 退出登录
+  app.post("/api/auth/logout", (req: Request, res: Response) => {
+    res.clearCookie("auth_token");
+    res.json({ success: true });
+  });
+
+  // 获取当前登录用户
+  app.get("/api/auth/me", (req: AuthRequest, res: Response) => {
+    const token = req.cookies?.auth_token;
+    if (!token) {
+      return res.status(200).json({ user: null });
+    }
+    try {
+      const payload = jwt.verify(token, JWT_SECRET) as { userId: number };
+      const user = getUserById(payload.userId);
+      if (!user || !user.is_active) {
+        return res.status(200).json({ user: null });
+      }
+      res.json({ user: sanitizeUser(user) });
+    } catch {
+      return res.status(200).json({ user: null });
+    }
+  });
+
+  // 当前用户修改自己的密码
+  app.post("/api/user/change-password", authMiddleware, async (req: AuthRequest, res: Response) => {
+    const { old_password, new_password } = req.body || {};
+    if (!old_password || !new_password) {
+      return res.status(400).json({ error: "old_password 和 new_password 为必填" });
+    }
+    const userRecord = req.user && getUserById(req.user.id);
+    if (!userRecord) {
+      return res.status(401).json({ error: "用户不存在" });
+    }
+    const ok = await bcrypt.compare(old_password, userRecord.password_hash);
+    if (!ok) {
+      return res.status(400).json({ error: "原密码不正确" });
+    }
+    const hash = await bcrypt.hash(new_password, 10);
+    const updated = updateUser(userRecord.id, { password_hash: hash });
+    res.json({ success: true, user: updated && sanitizeUser(updated) });
+  });
+
+  // --- 管理员用户管理接口 ---
+
+  // 列出所有用户
+  app.get("/api/admin/users", authMiddleware, requireAdmin, (req: AuthRequest, res: Response) => {
+    const users = listUsers().map(sanitizeUser);
+    res.json({ users });
+  });
+
+  // 创建用户
+  app.post("/api/admin/users", authMiddleware, requireAdmin, async (req: AuthRequest, res: Response) => {
+    const { username, password, role } = req.body || {};
+    if (!username || !password) {
+      return res.status(400).json({ error: "用户名和密码不能为空" });
+    }
+    if (role && role !== "admin" && role !== "user") {
+      return res.status(400).json({ error: "角色必须是 admin 或 user" });
+    }
+    try {
+      const hash = await bcrypt.hash(password, 10);
+      const user = createUser(username, hash, (role as UserRole) || "user");
+      res.json({ user: sanitizeUser(user) });
+    } catch (e: any) {
+      if (e && e.code === "SQLITE_CONSTRAINT_UNIQUE") {
+        return res.status(400).json({ error: "用户名已存在" });
+      }
+      console.error("Create user error:", e);
+      res.status(500).json({ error: "创建用户失败" });
+    }
+  });
+
+  // 更新用户（用户名、角色、启用状态）
+  app.put("/api/admin/users/:id", authMiddleware, requireAdmin, (req: AuthRequest, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ error: "无效的用户 ID" });
+    }
+    const { username, role, is_active } = req.body || {};
+    if (role && role !== "admin" && role !== "user") {
+      return res.status(400).json({ error: "角色必须是 admin 或 user" });
+    }
+    const existing = getUserById(id);
+    if (!existing) {
+      return res.status(404).json({ error: "用户不存在" });
+    }
+    const updated = updateUser(id, {
+      username,
+      role,
+      is_active: typeof is_active === "boolean" ? (is_active ? 1 : 0) : undefined,
+    });
+    res.json({ user: updated && sanitizeUser(updated) });
+  });
+
+  // 管理员重置密码
+  app.post("/api/admin/users/:id/password", authMiddleware, requireAdmin, async (req: AuthRequest, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ error: "无效的用户 ID" });
+    }
+    const { new_password } = req.body || {};
+    if (!new_password) {
+      return res.status(400).json({ error: "new_password 为必填" });
+    }
+    const existing = getUserById(id);
+    if (!existing) {
+      return res.status(404).json({ error: "用户不存在" });
+    }
+    const hash = await bcrypt.hash(new_password, 10);
+    const updated = updateUser(id, { password_hash: hash });
+    res.json({ success: true, user: updated && sanitizeUser(updated) });
+  });
+
+  // 删除用户
+  app.delete("/api/admin/users/:id", authMiddleware, requireAdmin, (req: AuthRequest, res: Response) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id)) {
+      return res.status(400).json({ error: "无效的用户 ID" });
+    }
+    const existing = getUserById(id);
+    if (!existing) {
+      return res.status(404).json({ error: "用户不存在" });
+    }
+    deleteUser(id);
+    res.json({ success: true });
+  });
 
   // API: Get Feishu Auth URL
   app.get("/api/auth/feishu/url", (req, res) => {

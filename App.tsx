@@ -7,6 +7,19 @@ import { INITIAL_SOURCE_PLACEHOLDER, INITIAL_STYLE_PLACEHOLDER, DEFAULT_PROVIDER
 import { ProcessingState } from './types';
 import { getFeishuTokens, saveFeishuTokens, clearFeishuTokens, createFeishuDoc, exchangeFeishuCode, refreshFeishuTokens, FeishuTokens } from './services/feishuService';
 import { Layout, FileText, ExternalLink, LogOut, RefreshCw, Key } from 'lucide-react';
+import { 
+  AuthUser, 
+  fetchMe, 
+  login as loginApi, 
+  logout as logoutApi,
+  listUsers,
+  createUserApi,
+  updateUserApi,
+  resetUserPassword,
+  deleteUserApi,
+  changeMyPassword,
+  UserRole
+} from './services/authService';
 
 const SettingsIcon = () => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5">
@@ -50,6 +63,11 @@ const CheckIcon = () => (
 );
 
 const App: React.FC = () => {
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [view, setView] = useState<'login' | 'main' | 'admin'>('login');
+
   const [sourceContent, setSourceContent] = useState<string>(INITIAL_SOURCE_PLACEHOLDER);
   const [sourceMode, setSourceMode] = useState<'input' | 'generate'>('input');
   const [sceneInput, setSceneInput] = useState<string>('');
@@ -84,12 +102,59 @@ const App: React.FC = () => {
   const [isOutputFocused, setIsOutputFocused] = useState(false);
   const [isRefreshingFeishu, setIsRefreshingFeishu] = useState(false);
 
+  // 管理后台状态
+  const [adminUsers, setAdminUsers] = useState<AuthUser[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminError, setAdminError] = useState<string | null>(null);
+  const [newUser, setNewUser] = useState<{ username: string; password: string; role: UserRole }>({
+    username: '',
+    password: '',
+    role: 'user'
+  });
+  const [passwordModalOpen, setPasswordModalOpen] = useState(false);
+  const [passwordOld, setPasswordOld] = useState('');
+  const [passwordNew, setPasswordNew] = useState('');
+
+  // 登录表单
+  const [loginUsername, setLoginUsername] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+
   // Sync outputContent to outputRef when not focused
   useEffect(() => {
     if (outputRef.current && !isOutputFocused && outputContent !== outputRef.current.innerHTML) {
       outputRef.current.innerHTML = outputContent;
     }
   }, [outputContent, isOutputFocused]);
+
+  // 初始化时获取当前登录用户
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        setAuthLoading(true);
+        const user = await fetchMe();
+        if (cancelled) return;
+        setAuthUser(user);
+        if (user) {
+          setView('main');
+        } else {
+          setView('login');
+        }
+      } catch (e: any) {
+        if (!cancelled) {
+          setAuthError(e.message || '获取登录状态失败');
+          setView('login');
+        }
+      } finally {
+        if (!cancelled) {
+          setAuthLoading(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Listen for Feishu Auth Success
   useEffect(() => {
@@ -103,6 +168,135 @@ const App: React.FC = () => {
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, []);
+
+  const handleLogin = async () => {
+    if (!loginUsername.trim() || !loginPassword.trim()) {
+      setAuthError('请输入用户名和密码');
+      return;
+    }
+    try {
+      setAuthError(null);
+      setAuthLoading(true);
+      const user = await loginApi(loginUsername.trim(), loginPassword);
+      setAuthUser(user);
+      setLoginPassword('');
+      setView('main');
+    } catch (e: any) {
+      setAuthError(e.message || '登录失败');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    await logoutApi();
+    setAuthUser(null);
+    setView('login');
+  };
+
+  const openAdminView = async () => {
+    setView('admin');
+    setAdminError(null);
+    setAdminLoading(true);
+    try {
+      const users = await listUsers();
+      setAdminUsers(users);
+    } catch (e: any) {
+      setAdminError(e.message || '加载用户列表失败');
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const refreshUsers = async () => {
+    setAdminLoading(true);
+    try {
+      const users = await listUsers();
+      setAdminUsers(users);
+    } catch (e: any) {
+      setAdminError(e.message || '加载用户列表失败');
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const handleCreateUser = async () => {
+    if (!newUser.username.trim() || !newUser.password.trim()) {
+      setAdminError('请填写用户名和密码');
+      return;
+    }
+    try {
+      setAdminError(null);
+      await createUserApi({
+        username: newUser.username.trim(),
+        password: newUser.password,
+        role: newUser.role,
+      });
+      setNewUser({ username: '', password: '', role: 'user' });
+      await refreshUsers();
+    } catch (e: any) {
+      setAdminError(e.message || '创建用户失败');
+    }
+  };
+
+  const handleToggleUserActive = async (user: AuthUser) => {
+    try {
+      setAdminError(null);
+      await updateUserApi(user.id, { is_active: !user.is_active });
+      await refreshUsers();
+    } catch (e: any) {
+      setAdminError(e.message || '更新用户失败');
+    }
+  };
+
+  const handleChangeUserRole = async (user: AuthUser, role: UserRole) => {
+    try {
+      setAdminError(null);
+      await updateUserApi(user.id, { role });
+      await refreshUsers();
+    } catch (e: any) {
+      setAdminError(e.message || '更新用户失败');
+    }
+  };
+
+  const handleDeleteUser = async (user: AuthUser) => {
+    if (!window.confirm(`确认删除用户 ${user.username} 吗？`)) return;
+    try {
+      setAdminError(null);
+      await deleteUserApi(user.id);
+      await refreshUsers();
+    } catch (e: any) {
+      setAdminError(e.message || '删除用户失败');
+    }
+  };
+
+  const handleResetUserPassword = async (user: AuthUser) => {
+    const pwd = window.prompt(`为用户 ${user.username} 设置新密码：`);
+    if (!pwd) return;
+    try {
+      setAdminError(null);
+      await resetUserPassword(user.id, pwd);
+      alert('密码重置成功');
+    } catch (e: any) {
+      setAdminError(e.message || '重置密码失败');
+    }
+  };
+
+  const handleChangeMyPassword = async () => {
+    if (!passwordOld || !passwordNew) {
+      setStatus(prev => ({ ...prev, error: "请填写完整原密码和新密码" }));
+      return;
+    }
+    try {
+      await changeMyPassword(passwordOld, passwordNew);
+      setPasswordOld('');
+      setPasswordNew('');
+      setPasswordModalOpen(false);
+      setStatus(prev => ({ ...prev, error: null }));
+    } catch (e: any) {
+      setStatus(prev => ({ ...prev, error: e.message || "修改密码失败" }));
+    }
+  };
 
   const handleFeishuConnect = async () => {
     try {
@@ -390,6 +584,218 @@ const App: React.FC = () => {
     }
   }, [outputContent, status.isSuccess]);
 
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="text-sm text-slate-500">正在加载...</div>
+      </div>
+    );
+  }
+
+  if (!authUser || view === 'login') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+        <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-slate-200 p-8 space-y-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-2">
+              <div className="bg-indigo-600 p-2 rounded-xl text-white shadow-lg shadow-indigo-200">
+                <MagicIcon />
+              </div>
+              <div>
+                <h1 className="text-lg font-bold text-slate-800">智能文本风格迁移助手</h1>
+                <p className="text-xs text-slate-400 mt-1">请先登录后使用与管理用户</p>
+              </div>
+            </div>
+          </div>
+          {authError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-xs">
+              {authError}
+            </div>
+          )}
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1.5">用户名</label>
+              <input
+                value={loginUsername}
+                onChange={(e) => setLoginUsername(e.target.value)}
+                autoComplete="username"
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none text-sm"
+                placeholder="请输入用户名"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-600 mb-1.5">密码</label>
+              <input
+                type="password"
+                value={loginPassword}
+                onChange={(e) => setLoginPassword(e.target.value)}
+                autoComplete="current-password"
+                className="w-full px-3 py-2 rounded-xl border border-slate-200 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none text-sm"
+                placeholder="请输入密码"
+              />
+            </div>
+            <Button
+              onClick={handleLogin}
+              disabled={authLoading}
+              className="w-full font-bold py-2.5 rounded-xl"
+            >
+              {authLoading ? '正在登录...' : '登录'}
+            </Button>
+            <p className="text-[10px] text-slate-400 mt-2">
+              首次使用：请在后端调用 <code>/api/auth/init-admin</code> 初始化管理员账号。
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const renderAdminView = () => (
+    <div className="max-w-7xl mx-auto px-4 py-8">
+      <div className="flex items-center justify-between mb-6">
+        <div>
+          <h2 className="text-lg font-bold text-slate-800">用户管理后台</h2>
+          <p className="text-xs text-slate-400 mt-1">新增/禁用用户、设置角色和重置密码</p>
+        </div>
+        <Button onClick={() => setView('main')} className="text-xs px-4 py-2 rounded-xl">
+          返回助手
+        </Button>
+      </div>
+      {adminError && (
+        <div className="mb-4 p-3 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 text-xs">
+          {adminError}
+        </div>
+      )}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-4 mb-6">
+        <h3 className="text-sm font-semibold text-slate-700 mb-3">新增用户</h3>
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">用户名</label>
+            <input
+              value={newUser.username}
+              onChange={(e) => setNewUser(prev => ({ ...prev, username: e.target.value }))}
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">初始密码</label>
+            <input
+              type="password"
+              value={newUser.password}
+              onChange={(e) => setNewUser(prev => ({ ...prev, password: e.target.value }))}
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-500 mb-1">角色</label>
+            <select
+              value={newUser.role}
+              onChange={(e) => setNewUser(prev => ({ ...prev, role: e.target.value as UserRole }))}
+              className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none"
+            >
+              <option value="user">普通用户</option>
+              <option value="admin">管理员</option>
+            </select>
+          </div>
+          <div>
+            <Button onClick={handleCreateUser} className="w-full text-sm py-2.5 rounded-xl">
+              创建
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+          <h3 className="text-sm font-semibold text-slate-700">用户列表</h3>
+          <button
+            onClick={refreshUsers}
+            className="text-xs text-slate-400 hover:text-indigo-500"
+          >
+            刷新
+          </button>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-xs">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr>
+                <th className="px-4 py-2 text-left font-semibold">ID</th>
+                <th className="px-4 py-2 text-left font-semibold">用户名</th>
+                <th className="px-4 py-2 text-left font-semibold">角色</th>
+                <th className="px-4 py-2 text-left font-semibold">状态</th>
+                <th className="px-4 py-2 text-left font-semibold">创建时间</th>
+                <th className="px-4 py-2 text-left font-semibold">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {adminLoading ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-slate-400">
+                    加载中...
+                  </td>
+                </tr>
+              ) : adminUsers.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-4 py-6 text-center text-slate-400">
+                    暂无用户
+                  </td>
+                </tr>
+              ) : (
+                adminUsers.map((u) => (
+                  <tr key={u.id} className="border-t border-slate-100">
+                    <td className="px-4 py-2">{u.id}</td>
+                    <td className="px-4 py-2">{u.username}</td>
+                    <td className="px-4 py-2">
+                      <select
+                        value={u.role}
+                        onChange={(e) => handleChangeUserRole(u, e.target.value as UserRole)}
+                        className="px-2 py-1 rounded-lg border border-slate-200 text-xs"
+                      >
+                        <option value="user">user</option>
+                        <option value="admin">admin</option>
+                      </select>
+                    </td>
+                    <td className="px-4 py-2">
+                      <button
+                        onClick={() => handleToggleUserActive(u)}
+                        className={`px-2 py-1 rounded-full text-[10px] font-semibold ${
+                          u.is_active
+                            ? 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                            : 'bg-slate-100 text-slate-500 border border-slate-200'
+                        }`}
+                      >
+                        {u.is_active ? '启用中' : '已禁用'}
+                      </button>
+                    </td>
+                    <td className="px-4 py-2 text-slate-400">
+                      {new Date(u.created_at).toLocaleString()}
+                    </td>
+                    <td className="px-4 py-2 space-x-2">
+                      <button
+                        onClick={() => handleResetUserPassword(u)}
+                        className="text-xs text-indigo-500 hover:underline"
+                      >
+                        重置密码
+                      </button>
+                      {authUser.id !== u.id && (
+                        <button
+                          onClick={() => handleDeleteUser(u)}
+                          className="text-xs text-rose-500 hover:underline"
+                        >
+                          删除
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-12 font-sans selection:bg-indigo-100 selection:text-indigo-900">
       <header className="bg-white/80 backdrop-blur-md border-b border-slate-200 sticky top-0 z-20 shadow-sm">
@@ -430,13 +836,42 @@ const App: React.FC = () => {
              >
                <SettingsIcon />
              </button>
-             <span className="hidden md:inline-block text-[10px] font-bold tracking-widest uppercase text-slate-400 border border-slate-200 px-3 py-1 rounded-full">
-               PRO VERSION · 极致复刻模式
-             </span>
+             {authUser && (
+               <div className="flex items-center space-x-2 text-xs text-slate-500">
+                 <span className="px-2 py-1 rounded-full bg-slate-100 border border-slate-200">
+                   {authUser.username}（{authUser.role === 'admin' ? '管理员' : '用户'}）
+                 </span>
+                 {authUser.role === 'admin' && (
+                   <button
+                     onClick={openAdminView}
+                     className="px-2 py-1 rounded-full border border-indigo-200 text-indigo-600 hover:bg-indigo-50"
+                   >
+                     管理后台
+                   </button>
+                 )}
+                 <button
+                   onClick={() => setPasswordModalOpen(true)}
+                   className="p-1 text-slate-400 hover:text-indigo-600"
+                   title="修改密码"
+                 >
+                   <Key size={16} />
+                 </button>
+                 <button
+                   onClick={handleLogout}
+                   className="p-1 text-slate-400 hover:text-rose-500"
+                   title="退出登录"
+                 >
+                   <LogOut size={16} />
+                 </button>
+               </div>
+             )}
           </div>
         </div>
       </header>
 
+      {view === 'admin' ? (
+        renderAdminView()
+      ) : (
       <main className="max-w-7xl mx-auto px-4 py-8">
         {status.error && (
           <div className="mb-6 p-4 rounded-xl bg-rose-50 border border-rose-100 text-rose-700 flex items-center animate-in fade-in slide-in-from-top-4 duration-300">
@@ -745,6 +1180,7 @@ const App: React.FC = () => {
 
         </div>
       </main>
+      )}
       
       <footer className="max-w-7xl mx-auto px-4 mt-8 text-center">
          <div className="inline-flex items-center space-x-4 text-[10px] text-slate-400 font-medium">
@@ -904,6 +1340,51 @@ const App: React.FC = () => {
                 className="w-full font-bold py-3 rounded-xl shadow-lg shadow-indigo-100"
               >
                 保存配置
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 修改密码 Modal */}
+      {passwordModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-sm">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-sm overflow-hidden">
+            <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-800 flex items-center">
+                <Key size={18} className="mr-2" />
+                修改密码
+              </h3>
+              <button
+                onClick={() => setPasswordModalOpen(false)}
+                className="text-slate-400 hover:text-slate-600 p-1"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">原密码</label>
+                <input
+                  type="password"
+                  value={passwordOld}
+                  onChange={(e) => setPasswordOld(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-semibold text-slate-600 mb-1.5">新密码</label>
+                <input
+                  type="password"
+                  value={passwordNew}
+                  onChange={(e) => setPasswordNew(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100 outline-none"
+                />
+              </div>
+              <Button onClick={handleChangeMyPassword} className="w-full font-bold py-2.5 rounded-xl">
+                确认修改
               </Button>
             </div>
           </div>
