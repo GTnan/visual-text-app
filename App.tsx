@@ -127,36 +127,37 @@ const App: React.FC = () => {
       // Extract first title for document name
       const parser = new DOMParser();
       const doc = parser.parseFromString(outputContent, 'text/html');
-      const title = doc.querySelector('h1, h2')?.textContent || "智能风格迁移文档";
+      const h1Element = doc.querySelector('h1');
+      const extractedTitle = h1Element?.textContent?.replace(/[\n\r\t]/g, "").trim() || doc.querySelector('h2')?.textContent?.replace(/[\n\r\t]/g, "").trim() || "智能风格迁移文档";
+
+      let title = extractedTitle;
+      // Generate fallback title if it doesn't match the expected format
+      if (!title.startsWith("【")) {
+        const today = new Date();
+        const formattedDate = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        const titleName = sceneInput.trim() || title;
+        title = `【${formattedDate}】 - ${titleName}`;
+      }
+
+      // Remove the h1 element from the document body so it doesn't duplicate as content
+      if (h1Element) {
+        h1Element.remove();
+      }
+      const contentForFeishu = doc.body.innerHTML;
 
       // Prepare debug request info
       const { convertHtmlToFeishuBlocks } = await import('./services/feishuService');
-      const blocks = convertHtmlToFeishuBlocks(outputContent);
+      const blocks = convertHtmlToFeishuBlocks(contentForFeishu);
       
       // 严格按照发送给后端的 Payload 结构记录调试信息
       const requestPayload = {
+        title,
         index: 0,
-        children: [
-          {
-            block_type: 3, // Heading 1
-            heading1: {
-              elements: [
-                {
-                  text_run: {
-                    content: title.replace(/[\n\r\t]/g, "").trim() || "智能风格迁移文档",
-                    text_element_style: { bold: true }
-                  }
-                }
-              ],
-              style: {}
-            }
-          },
-          ...blocks
-        ]
+        children: blocks
       };
       setFeishuRequest(JSON.stringify(requestPayload, null, 2));
 
-      const result = await createFeishuDoc(title, outputContent, feishuTokens);
+      const result = await createFeishuDoc(title, contentForFeishu, feishuTokens);
       
       // Update tokens in state if they were refreshed in the service
       const latestTokens = getFeishuTokens();
@@ -200,6 +201,79 @@ const App: React.FC = () => {
     }
   };
 
+  const handleGenerate = useCallback(async (overrideSourceContent?: string | React.MouseEvent) => {
+    const actualOverride = typeof overrideSourceContent === 'string' ? overrideSourceContent : undefined;
+    const contentToUse = actualOverride || sourceContent;
+    // 基础校验
+    if (!contentToUse || contentToUse === INITIAL_SOURCE_PLACEHOLDER || contentToUse.trim() === "") {
+      setStatus(prev => ({ ...prev, error: "请填写源文本后再试。" }));
+      return;
+    }
+    if (!styleContent || styleContent.trim() === "") {
+      setStatus(prev => ({ ...prev, error: "请填写参考风格后再试。" }));
+      return;
+    }
+
+    setStatus({ isLoading: true, error: null, isSuccess: false });
+    setIsCopied(false);
+    setOutputContent('<p class="text-gray-400 animate-pulse text-center py-12">正在提取视觉基因并重构内容...</p>');
+    setRawRequest('');
+    setRawResponse('');
+
+    try {
+      const result = await transformTextStyle(
+        contentToUse, 
+        styleContent, 
+        provider, 
+        {
+          gemini: geminiKey,
+          siliconflow: siliconflowKey
+        },
+        (chunk, req, res) => {
+          if (chunk) setOutputContent(chunk);
+          if (req) setRawRequest(req);
+          if (res) setRawResponse(res);
+        }
+      );
+      setOutputContent(result);
+      setStatus({ isLoading: false, error: null, isSuccess: true });
+    } catch (err: any) {
+      console.error(err);
+      let errorMessage = err.message || "生成失败，请检查网络或 API Key。";
+      
+      // 针对余额不足的特定提示
+      const isBalanceError = errorMessage.includes('insufficient') || errorMessage.includes('余额不足');
+      // 针对限流 429 的特定提示
+      const isRateLimitError = errorMessage.includes('429') || errorMessage.includes('RESOURCE_EXHAUSTED') || errorMessage.includes('quota');
+      
+      setStatus({ 
+        isLoading: false, 
+        error: errorMessage, 
+        isSuccess: false 
+      });
+      
+      setOutputContent(`<div class="text-red-500 p-4 bg-red-50 rounded-xl border border-red-100">
+        <p class="font-bold mb-2">生成过程中发生错误：</p>
+        <p class="text-sm opacity-80">${errorMessage}</p>
+        ${isBalanceError ? `
+          <div class="mt-4 p-3 bg-white/50 rounded-lg border border-red-200 text-xs text-red-700">
+            <strong>💡 建议方案：</strong><br/>
+            检测到硅基流动账户余额不足。请在顶部切换到 <b>Gemini</b> 模型继续免费使用，或在设置中更新您的 API Key。
+          </div>
+        ` : ''}
+        ${isRateLimitError ? `
+          <div class="mt-4 p-3 bg-white/50 rounded-lg border border-red-200 text-xs text-red-700">
+            <strong>💡 建议方案：</strong><br/>
+            检测到 API 请求频率过高或额度耗尽（429 限流）。<br/>
+            1. <b>模型降级</b>：请在顶部切换为 <b>Gemini Fast</b> 模型，它的免费额度远高于 Pro 模型。<br/>
+            2. <b>稍后重试</b>：请等待 1-2 分钟后再点击“一键生成并迁移风格”。<br/>
+            3. <b>配置专属 Key</b>：在右上角“设置”中填入您自己的 API Key 以提升额度。
+          </div>
+        ` : ''}
+      </div>`);
+    }
+  }, [sourceContent, styleContent, provider, geminiKey, siliconflowKey]);
+
   const handleGenerateSource = useCallback(async () => {
     if (!sceneInput.trim()) {
       setStatus(prev => ({ ...prev, error: "请输入场景描述后再试。" }));
@@ -238,9 +312,16 @@ const App: React.FC = () => {
         .join('');
       setSourceContent(htmlGenerated);
       setSourceMode('input'); // 生成后切回输入模式查看结果
+      
+      // 自动触发风格迁移
+      setTimeout(() => {
+        handleGenerate(htmlGenerated);
+      }, 500);
     } catch (err: any) {
       console.error(err);
       const errorMessage = err.message || "生成源文本失败，请重试。";
+      const isRateLimitError = errorMessage.includes('429') || errorMessage.includes('RESOURCE_EXHAUSTED') || errorMessage.includes('quota');
+      
       setStatus({ 
         isLoading: false, 
         error: errorMessage, 
@@ -249,71 +330,20 @@ const App: React.FC = () => {
       setSourceContent(`<div class="text-red-500 p-4 bg-red-50 rounded-xl border border-red-100">
         <p class="font-bold mb-2">生成失败：</p>
         <p class="text-sm opacity-80">${errorMessage}</p>
+        ${isRateLimitError ? `
+          <div class="mt-4 p-3 bg-white/50 rounded-lg border border-red-200 text-xs text-red-700">
+            <strong>💡 建议方案：</strong><br/>
+            检测到 API 请求频率过高或额度耗尽（429 限流）。<br/>
+            1. <b>模型降级</b>：请在顶部切换为 <b>Gemini Fast</b> 模型，它的免费额度远高于 Pro 模型。<br/>
+            2. <b>稍后重试</b>：请等待 1-2 分钟后再重新生成。<br/>
+            3. <b>配置专属 Key</b>：在右上角“设置”中填入您自己的 API Key 以提升额度。
+          </div>
+        ` : ''}
       </div>`);
     } finally {
       setIsGeneratingSource(false);
     }
-  }, [sceneInput, provider, geminiKey, siliconflowKey]);
-
-  const handleGenerate = useCallback(async () => {
-    // 基础校验
-    if (!sourceContent || sourceContent === INITIAL_SOURCE_PLACEHOLDER || sourceContent.trim() === "") {
-      setStatus(prev => ({ ...prev, error: "请填写源文本后再试。" }));
-      return;
-    }
-    if (!styleContent || styleContent.trim() === "") {
-      setStatus(prev => ({ ...prev, error: "请填写参考风格后再试。" }));
-      return;
-    }
-
-    setStatus({ isLoading: true, error: null, isSuccess: false });
-    setIsCopied(false);
-    setOutputContent('<p class="text-gray-400 animate-pulse text-center py-12">正在提取视觉基因并重构内容...</p>');
-    setRawRequest('');
-    setRawResponse('');
-
-    try {
-      const result = await transformTextStyle(
-        sourceContent, 
-        styleContent, 
-        provider, 
-        {
-          gemini: geminiKey,
-          siliconflow: siliconflowKey
-        },
-        (chunk, req, res) => {
-          if (chunk) setOutputContent(chunk);
-          if (req) setRawRequest(req);
-          if (res) setRawResponse(res);
-        }
-      );
-      setOutputContent(result);
-      setStatus({ isLoading: false, error: null, isSuccess: true });
-    } catch (err: any) {
-      console.error(err);
-      let errorMessage = err.message || "生成失败，请检查网络或 API Key。";
-      
-      // 针对余额不足的特定提示
-      const isBalanceError = errorMessage.includes('insufficient') || errorMessage.includes('余额不足');
-      
-      setStatus({ 
-        isLoading: false, 
-        error: errorMessage, 
-        isSuccess: false 
-      });
-      
-      setOutputContent(`<div class="text-red-500 p-4 bg-red-50 rounded-xl border border-red-100">
-        <p class="font-bold mb-2">生成过程中发生错误：</p>
-        <p class="text-sm opacity-80">${errorMessage}</p>
-        ${isBalanceError ? `
-          <div class="mt-4 p-3 bg-white/50 rounded-lg border border-red-200 text-xs text-red-700">
-            <strong>💡 建议方案：</strong><br/>
-            检测到硅基流动账户余额不足。请在顶部切换到 <b>Gemini</b> 模型继续免费使用，或在设置中更新您的 API Key。
-          </div>
-        ` : ''}
-      </div>`);
-    }
-  }, [sourceContent, styleContent, provider, geminiKey, siliconflowKey]);
+  }, [sceneInput, provider, geminiKey, siliconflowKey, handleGenerate]);
 
   const handleSaveSettings = () => {
     localStorage.setItem('GEMINI_API_KEY', geminiKey);
@@ -375,10 +405,16 @@ const App: React.FC = () => {
           <div className="flex items-center space-x-4">
              <div className="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
                 <button 
-                  onClick={() => setProvider('gemini')}
-                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all ${provider === 'gemini' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                  onClick={() => setProvider('gemini-fast')}
+                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all ${provider === 'gemini-fast' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
                 >
-                  Gemini
+                  Gemini Fast
+                </button>
+                <button 
+                  onClick={() => setProvider('gemini-pro')}
+                  className={`text-[10px] font-bold px-3 py-1.5 rounded-lg transition-all ${provider === 'gemini-pro' ? 'bg-white text-indigo-600 shadow-sm' : 'text-slate-400 hover:text-slate-600'}`}
+                >
+                  Gemini Pro
                 </button>
                 <button 
                   onClick={() => setProvider('siliconflow')}
@@ -712,7 +748,7 @@ const App: React.FC = () => {
       
       <footer className="max-w-7xl mx-auto px-4 mt-8 text-center">
          <div className="inline-flex items-center space-x-4 text-[10px] text-slate-400 font-medium">
-           <span>基于 {provider === 'gemini' ? 'Gemini 3 Pro' : 'DeepSeek-V3'} 旗舰模型</span>
+           <span>基于 {provider === 'gemini-fast' ? 'Gemini 3 Flash' : provider === 'gemini-pro' ? 'Gemini 3 Pro' : 'DeepSeek-V3'} 旗舰模型</span>
            <span className="w-1 h-1 bg-slate-300 rounded-full"></span>
            <span>全量视觉样式提取引擎</span>
            <span className="w-1 h-1 bg-slate-300 rounded-full"></span>

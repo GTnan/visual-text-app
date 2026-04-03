@@ -96,8 +96,10 @@ const parseColor = (colorStr: string | undefined): { r: number, g: number, b: nu
  */
 const getFeishuColor = (colorStr: string | undefined): number | undefined => {
   if (!colorStr) return undefined;
-  const rgb = parseColor(colorStr);
   const s = colorStr.toLowerCase().trim();
+  if (s === 'transparent' || s === 'none' || s.includes('rgba(0, 0, 0, 0)')) return undefined;
+
+  const rgb = parseColor(colorStr);
   
   // 飞书标准文字颜色索引 (1-7)
   if (s.includes('red') || s.includes('pink') || s.includes('fuchsia')) return 1;
@@ -115,9 +117,9 @@ const getFeishuColor = (colorStr: string | undefined): number | undefined => {
   const { r, g, b } = rgb;
   
   // 红色系
-  if (r > 150 && g < 120 && b < 120) return 1;
+  if (r > 150 && g < 110 && b < 110) return 1;
   // 橙色/黄色系
-  if (r > 150 && g > 100 && b < 120) {
+  if (r > 150 && g >= 110 && b < 150) {
     if (g > 190) return 3; // 黄色
     return 2; // 橙色
   }
@@ -140,8 +142,10 @@ const getFeishuColor = (colorStr: string | undefined): number | undefined => {
  */
 const getFeishuBgColor = (colorStr: string | undefined): number | undefined => {
   if (!colorStr) return undefined;
-  const rgb = parseColor(colorStr);
   const s = colorStr.toLowerCase().trim();
+  if (s === 'transparent' || s === 'none' || s.includes('rgba(0, 0, 0, 0)')) return undefined;
+
+  const rgb = parseColor(colorStr);
 
   // 飞书背景颜色映射 (1-15)
   // 优先匹配浅色关键词
@@ -418,6 +422,7 @@ export const createFeishuDoc = async (title: string, html: string, tokens: Feish
   const children = blocks;
 
   const payload = {
+    title,
     children,
     index: 0
   };

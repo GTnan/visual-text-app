@@ -1,11 +1,12 @@
 // 使用 Gemini 3 Pro 以获得最强的视觉样式解析和语气模拟能力
-export const GEMINI_MODEL_NAME = 'gemini-3-pro-preview';
+export const GEMINI_PRO_MODEL_NAME = 'gemini-3-pro-preview';
+export const GEMINI_FAST_MODEL_NAME = 'gemini-3-flash-preview';
 
 // 硅基流动默认模型 (DeepSeek-V3 或 DeepSeek-R1)
 export const SILICONFLOW_MODEL_NAME = 'Pro/deepseek-ai/DeepSeek-R1';
 
-export type AIProvider = 'gemini' | 'siliconflow';
-export const DEFAULT_PROVIDER: AIProvider = 'gemini';
+export type AIProvider = 'gemini-fast' | 'gemini-pro' | 'siliconflow';
+export const DEFAULT_PROVIDER: AIProvider = 'gemini-pro';
 
 export const DEFAULT_SILICONFLOW_KEY = 'sk-vuajfowbfnkrdqdnpikbihhmhyrtgzkvaxvbmqrppxisflki';
 

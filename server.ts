@@ -168,56 +168,121 @@ async function startServer() {
     }
 
     try {
-      // 1. Create Document (File name in Feishu)
-      const createDocRes = await axios.post("https://open.feishu.cn/open-apis/docx/v1/documents", {
-        // We use a generic title for the file name, as the actual title is now inside the blocks
-        title: "智能风格迁移文档"
-      }, {
-        headers: {
-          "Authorization": `Bearer ${accessToken}`,
-          "Content-Type": "application/json"
-        }
-      });
+      const docTitle = req.body.title || "智能风格迁移文档";
+      let document_id = "";
+      let revision_id = -1;
+      let docUrl = "";
 
-      if (createDocRes.data.code !== 0) {
-        console.error("Feishu Create Doc Error:", createDocRes.data);
-        return res.status(400).json({ 
-          error: createDocRes.data.msg || "Failed to create document",
-          details: createDocRes.data
+      // 1. Try to find the "随笔记录" Wiki space
+      let targetSpaceId = null;
+      try {
+        const spacesRes = await axios.get("https://open.feishu.cn/open-apis/wiki/v2/spaces", {
+          headers: { "Authorization": `Bearer ${accessToken}` }
         });
+        if (spacesRes.data.code === 0 && spacesRes.data.data?.items) {
+          const space = spacesRes.data.data.items.find((s: any) => s.name === "随笔记录");
+          if (space) {
+            targetSpaceId = space.space_id;
+          }
+        }
+      } catch (err: any) {
+        console.warn("Failed to fetch wiki spaces, falling back to root folder", err.response?.data || err.message);
       }
 
-      const { document_id, revision_id } = createDocRes.data.data.document;
-
-      // 2. Add Blocks (Actual content)
-      if (children && children.length > 0) {
-        const payload = {
-          children: children,
-          index: 0
-        };
-
-        console.log("Feishu Add Blocks Request Payload:", JSON.stringify(payload, null, 2));
-
-        const childrenRes = await axios.post(`https://open.feishu.cn/open-apis/docx/v1/documents/${document_id}/blocks/${document_id}/children?document_revision_id=${revision_id}`, payload, {
+      // 2. Create Document
+      if (targetSpaceId) {
+        // Create in Wiki Space
+        const createNodeRes = await axios.post(`https://open.feishu.cn/open-apis/wiki/v2/spaces/${targetSpaceId}/nodes`, {
+          obj_type: "docx",
+          node_type: "origin",
+          title: docTitle
+        }, {
           headers: {
             "Authorization": `Bearer ${accessToken}`,
             "Content-Type": "application/json"
           }
         });
 
-        if (childrenRes.data.code !== 0) {
-          console.error("Feishu Add Blocks Error:", childrenRes.data);
+        if (createNodeRes.data.code !== 0) {
+          console.error("Feishu Create Wiki Node Error:", createNodeRes.data);
           return res.status(400).json({ 
-            error: childrenRes.data.msg || "Failed to add content blocks",
-            details: childrenRes.data
+            error: createNodeRes.data.msg || "Failed to create wiki document",
+            details: createNodeRes.data
           });
+        }
+        document_id = createNodeRes.data.data.node.obj_token;
+        docUrl = createNodeRes.data.data.node.url;
+        
+        // Fetch document details to get revision_id
+        const docRes = await axios.get(`https://open.feishu.cn/open-apis/docx/v1/documents/${document_id}`, {
+          headers: { "Authorization": `Bearer ${accessToken}` }
+        });
+        revision_id = docRes.data.data.document.revision_id;
+      } else {
+        // Fallback: Create in Root Folder
+        const createDocRes = await axios.post("https://open.feishu.cn/open-apis/docx/v1/documents", {
+          title: docTitle
+        }, {
+          headers: {
+            "Authorization": `Bearer ${accessToken}`,
+            "Content-Type": "application/json"
+          }
+        });
+
+        if (createDocRes.data.code !== 0) {
+          console.error("Feishu Create Doc Error:", createDocRes.data);
+          return res.status(400).json({ 
+            error: createDocRes.data.msg || "Failed to create document",
+            details: createDocRes.data
+          });
+        }
+
+        document_id = createDocRes.data.data.document.document_id;
+        revision_id = createDocRes.data.data.document.revision_id;
+        docUrl = `https://feishu.cn/docx/${document_id}`;
+      }
+
+      // 3. Add Blocks (Actual content)
+      if (children && children.length > 0) {
+        // Feishu API has a limit of 50 blocks per request
+        const chunkSize = 50;
+        let currentRevisionId = revision_id;
+        let currentIndex = 0; // Insert at the beginning, then append
+
+        for (let i = 0; i < children.length; i += chunkSize) {
+          const chunk = children.slice(i, i + chunkSize);
+          const payload = {
+            children: chunk,
+            index: currentIndex
+          };
+
+          console.log(`Feishu Add Blocks Request Payload (Chunk ${i / chunkSize + 1}):`, JSON.stringify(payload, null, 2));
+
+          const childrenRes = await axios.post(`https://open.feishu.cn/open-apis/docx/v1/documents/${document_id}/blocks/${document_id}/children?document_revision_id=${currentRevisionId}`, payload, {
+            headers: {
+              "Authorization": `Bearer ${accessToken}`,
+              "Content-Type": "application/json"
+            }
+          });
+
+          if (childrenRes.data.code !== 0) {
+            console.error("Feishu Add Blocks Error:", childrenRes.data);
+            return res.status(400).json({ 
+              error: childrenRes.data.msg || "Failed to add content blocks",
+              details: childrenRes.data
+            });
+          }
+
+          // Update revision_id for the next chunk
+          currentRevisionId = childrenRes.data.data.document_revision_id;
+          currentIndex += chunk.length;
         }
       }
 
       res.json({ 
         success: true, 
         document_id: document_id,
-        url: `https://feishu.cn/docx/${document_id}`
+        url: docUrl
       });
     } catch (error: any) {
       console.error("Feishu Doc Creation Error:", error.response?.data || error.message);
