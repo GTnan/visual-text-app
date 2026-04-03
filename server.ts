@@ -165,7 +165,7 @@ async function startServer() {
     }
     const ok = await bcrypt.compare(old_password, userRecord.password_hash);
     if (!ok) {
-      return res.status(400).json({ error: "原密码不正确" });
+      return res.status(400).json({ error: "原密码不正确哦" });
     }
     const hash = await bcrypt.hash(new_password, 10);
     const updated = updateUser(userRecord.id, { password_hash: hash });
