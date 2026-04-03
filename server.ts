@@ -24,7 +24,7 @@ const __dirname = path.dirname(__filename);
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = 7786;
 
   app.use(express.json());
   app.use(cookieParser());
